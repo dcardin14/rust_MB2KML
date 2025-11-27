@@ -128,14 +128,14 @@ fn main() -> io::Result<()> {
 
     let xratio = get_long_ratio(lat);
     let yratio = get_lat_ratio(lat);
-    let mut coordinates = vec![(long, lat)];
+    let coordinates = vec![(long, lat)];
     
     ////////////////////////////////////////////////
     let mut coordinates = vec![(long, lat)];
     let mut last_azimuth_degrees: Option<f64> = None;
     ////////////////////////////////////////////////
     
-    for line in lines.skip(1) {
+for line in lines.skip(1) {
     let line = line.trim();
     if line.is_empty() {
         continue;
@@ -146,14 +146,14 @@ fn main() -> io::Result<()> {
         continue;
     }
 
-    // 1) Curve lines: CRV L/R RADIUS D M S
-    if parts[0].eq_ignore_ascii_case("CRV") {
-        if parts.len() < 6 {
-            eprintln!("Skipping invalid curve line (need CRV L/R RADIUS D M S): {}", line);
+    // 1a) Curves defined by Radius + Arc Length: CRV_RL L/R RADIUS ARC_LENGTH
+    if parts[0].eq_ignore_ascii_case("CRV_RL") {
+        if parts.len() < 4 {
+            eprintln!("Skipping invalid curve line (need CRV_RL L/R RADIUS ARC_LENGTH): {}", line);
             continue;
         }
 
-        // You must have a previous straight-line segment to define the tangent
+        // Need a previous straight-line call to define tangent
         let start_azimuth_degrees = match last_azimuth_degrees {
             Some(a) => a,
             None => {
@@ -170,37 +170,35 @@ fn main() -> io::Result<()> {
             eprintln!("Invalid radius in curve line: {}", line);
             0.0
         });
-        let d: f64 = parts[3].parse().unwrap_or_else(|_| {
-            eprintln!("Invalid degrees in curve line: {}", line);
-            0.0
-        });
-        let m: f64 = parts[4].parse().unwrap_or_else(|_| {
-            eprintln!("Invalid minutes in curve line: {}", line);
-            0.0
-        });
-        let s: f64 = parts[5].parse().unwrap_or_else(|_| {
-            eprintln!("Invalid seconds in curve line: {}", line);
+        let arc_raw: f64 = parts[3].parse().unwrap_or_else(|_| {
+            eprintln!("Invalid arc length in curve line: {}", line);
             0.0
         });
 
-        let delta_degrees = d + (m / 60.0) + (s / 3600.0);
-        if delta_degrees <= 0.0 || radius_raw <= 0.0 {
-            eprintln!("Skipping degenerate curve line: {}", line);
+        if radius_raw <= 0.0 || arc_raw <= 0.0 {
+            eprintln!("Skipping degenerate CRV_RL line (radius/arc <= 0): {}", line);
             continue;
         }
 
-        // Convert radius to feet using same unit system as distances
+        // Convert to feet using same unit system as straight distances
         let radius_feet = to_feet(radius_raw, &unit_choice);
+        let arc_feet = to_feet(arc_raw, &unit_choice);
 
-        // Total central angle in radians
-        let delta_radians = delta_degrees.to_radians();
+        if radius_feet <= 0.0 || arc_feet <= 0.0 {
+            eprintln!("Skipping CRV_RL line after unit conversion: {}", line);
+            continue;
+        }
+
+        // Central angle from arc length: Δ = L / R
+        let delta_radians = arc_feet / radius_feet;
+        let delta_degrees = delta_radians.to_degrees();
 
         // Decide how many small segments to approximate the curve with
-        let segments = 16; // you can tweak this (more segments = smoother curve)
+        let segments = 16; // tweak as needed
         let delta_per_seg_deg = delta_degrees / segments as f64;
         let delta_per_seg_rad = delta_radians / segments as f64;
 
-        // Arc length per segment, approximate chord length the same
+        // Arc length per segment
         let arc_len_per_seg_feet = radius_feet * delta_per_seg_rad;
 
         // Direction we increment azimuth: left = +, right = -
@@ -217,11 +215,9 @@ fn main() -> io::Result<()> {
         let mut last_coord = *coordinates.last().unwrap();
 
         for _ in 0..segments {
-            // Advance azimuth along the curve
             current_azimuth_deg += sign * delta_per_seg_deg;
             let a_radians = current_azimuth_deg.to_radians();
 
-            // Move along this small segment
             let x_add = a_radians.sin() * arc_len_per_seg_feet * xratio;
             let y_add = a_radians.cos() * arc_len_per_seg_feet * yratio;
 
@@ -229,60 +225,14 @@ fn main() -> io::Result<()> {
             coordinates.push(last_coord);
         }
 
-        // After finishing the curve, remember final azimuth for next call
         last_azimuth_degrees = Some(current_azimuth_deg);
         continue;
     }
 
-    // 2) Straight lines (existing behavior)
-    if parts.len() < 6 {
-        eprintln!("Skipping invalid line: {}", line);
-        continue;
+    // 1b) Curves defined by Radius + Delta: CRV L/R RADIUS D M S (your existing block)
+    if parts[0].eq_ignore_ascii_case("CRV") {
+        // ... keep your current CRV block here unchanged ...
     }
-
-    let ns_bearing = parts[0];
-    let degrees: f64 = parts[1].parse().unwrap_or_else(|_| {
-        eprintln!("Invalid degree value in line: {}", line);
-        0.0
-    });
-    let minutes: f64 = parts[2].parse().unwrap_or_else(|_| {
-        eprintln!("Invalid minute value in line: {}", line);
-        0.0
-    });
-    let seconds: f64 = parts[3].parse().unwrap_or_else(|_| {
-        eprintln!("Invalid second value in line: {}", line);
-        0.0
-    });
-    let ew_bearing = parts[4];
-    let distance: f64 = parts[5].parse().unwrap_or_else(|_| {
-        eprintln!("Invalid distance in line: {}", line);
-        0.0
-    });
-
-    let decimal_degrees = degrees + (minutes / 60.0) + (seconds / 3600.0);
-    let azimuth_degrees = match (ns_bearing, ew_bearing) {
-        ("N", "E") | ("n", "e") => decimal_degrees,
-        ("N", "W") | ("n", "w") => 360.0 - decimal_degrees,
-        ("S", "E") | ("s", "e") => 180.0 - decimal_degrees,
-        ("S", "W") | ("s", "w") => 180.0 + decimal_degrees,
-        _ => {
-            eprintln!("Invalid bearing combination in line: {}", line);
-            0.0
-        }
-    };
-
-    let a_radians = azimuth_degrees.to_radians();
-    let hypotenuse_in_feet = to_feet(distance, &unit_choice);
-
-    let x_add = a_radians.sin() * hypotenuse_in_feet * xratio;
-    let y_add = a_radians.cos() * hypotenuse_in_feet * yratio;
-
-    let last_coord = coordinates.last().unwrap();
-    coordinates.push((last_coord.0 + x_add, last_coord.1 + y_add));
-
-    // Remember azimuth for possible following curve
-    last_azimuth_degrees = Some(azimuth_degrees);
-}
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Generate output filenames
     let kml_output_path = format!("{}.kml", base_filename);
@@ -291,7 +241,22 @@ fn main() -> io::Result<()> {
     writeln!(output_file, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")?;
     writeln!(output_file, "<kml xmlns=\"http://www.opengis.net/kml/2.2\">")?;
     writeln!(output_file, "<Document>")?;
+    writeln!(output_file, "<Style id=\"blueTransparent\">")?;
+    writeln!(output_file, "  <LineStyle>")?;
+    writeln!(output_file, "    <color>FF0000FF</color>")?;   // Outline: solid red (can change)
+    writeln!(output_file, "    <width>2</width>")?;
+    writeln!(output_file, "  </LineStyle>")?;
+    writeln!(output_file, "  <PolyStyle>")?;
+    writeln!(output_file, "    <color>4DFF0000</color>")?;   // Fill: BLUE @ ~30% opacity
+    writeln!(output_file, "    <fill>1</fill>")?;
+    writeln!(output_file, "    <outline>1</outline>")?;
+    writeln!(output_file, "  </PolyStyle>")?;
+    writeln!(output_file, "</Style>")?;
+
+
     writeln!(output_file, "<Placemark>")?;
+    writeln!(output_file, "<styleUrl>#blueTransparent</styleUrl>")?;
+    writeln!(output_file, "<altitudeMode>clampToGround</altitudeMode>")?;
     writeln!(output_file, "<Polygon>")?;
     writeln!(output_file, "<outerBoundaryIs>")?;
     writeln!(output_file, "<LinearRing>")?;
@@ -299,6 +264,10 @@ fn main() -> io::Result<()> {
 
     for (long, lat) in &coordinates {
         writeln!(output_file, "{},{},0", long, lat)?;
+    }
+    //Explicitly close the ring
+    if let Some((first_long, first_lat)) = coordinates.first() {
+    writeln!(output_file, "{},{},0", first_long, first_lat)?;
     }
 
     writeln!(output_file, "</coordinates>")?;
