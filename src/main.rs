@@ -21,6 +21,43 @@ fn is_clockwise(coordinates: &Vec<(f64, f64)>) -> bool {
     }
     sum > 0.0 // Clockwise if sum is positive
 }
+///////////////////////////////////////////////////////////////////////////
+fn print_usage(program: &str) {
+    eprintln!(
+        "Usage: {prog} <input_file>\n\n\
+         Reads a metes-and-bounds text file and writes KML and GeoJSON.\n\n\
+         Examples:\n  {prog} my_tract.txt\n",
+        prog = program
+    );
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Convert quadrant bearing (e.g. N 45 00 00 E) to azimuth in degrees
+fn quadrant_to_azimuth(
+    dir_ns: &str,
+    degrees: f64,
+    minutes: f64,
+    seconds: f64,
+    dir_ew: &str
+) -> Option<f64> {
+    let angle = degrees + minutes / 60.0 + seconds / 3600.0;
+
+    let ns = dir_ns.to_uppercase();
+    let ew = dir_ew.to_uppercase();
+
+    match (ns.as_str(), ew.as_str()) {
+        ("N", "E") => Some(angle),
+        ("N", "W") => Some(360.0 - angle),
+        ("S", "E") => Some(180.0 - angle),
+        ("S", "W") => Some(180.0 + angle),
+        _ => None,
+    }
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+
+
 
 /// Writes the polygon coordinates to a GeoJSON file
 fn write_geojson(filename: &str, coordinates: &Vec<(f64, f64)>) -> io::Result<()> {
@@ -87,20 +124,39 @@ fn to_feet(value: f64, unit_choice: &str) -> f64 {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
+    let program = &args[0];
+
+    // No arguments → print usage
     if args.len() < 2 {
-        eprintln!("Usage: {} <filename>", args[0]);
-        process::exit(1);
+        print_usage(program);
+        return Ok(());
     }
 
-    let filename = &args[1];
+    let arg1 = &args[1];
+
+    // Handle -h / --help
+    if arg1 == "-h" || arg1 == "--help" {
+        print_usage(program);
+        return Ok(());
+    }
+
+    let filename = arg1;
+
+    // 🔹 Recreate base_filename for KML/GeoJSON output
     let base_filename = Path::new(filename)
         .file_stem()
         .unwrap()
         .to_str()
         .unwrap()
-        .to_string(); // Extract filename without extension
+        .to_string();
 
-    let data = fs::read_to_string(filename).expect("Unable to read file");
+    let data = match fs::read_to_string(filename) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Unable to read file '{}': {}", filename, e);
+            process::exit(1);
+        }
+    };
 
     println!("What units are used in your data?\n\n(f) Feet\n(v) Varas\n(r) Rods\n(c) Chains\n(p) Poles\n(y) Yards");
     let mut input = String::new();
@@ -128,8 +184,6 @@ fn main() -> io::Result<()> {
 
     let xratio = get_long_ratio(lat);
     let yratio = get_lat_ratio(lat);
-    let coordinates = vec![(long, lat)];
-    
     ////////////////////////////////////////////////
     let mut coordinates = vec![(long, lat)];
     let mut last_azimuth_degrees: Option<f64> = None;
@@ -228,12 +282,277 @@ for line in lines.skip(1) {
         last_azimuth_degrees = Some(current_azimuth_deg);
         continue;
     }
+////////////////////////////////////////////////////////////////////////////
+        // 1c) Curves defined by Radius + Delta + Chord: CRV_RDC L/R R D M S CH_NS CH_D CH_M CH_S CH_EW CH_DIST
+        if parts[0].eq_ignore_ascii_case("CRV_RDC") {
+            if parts.len() < 12 {
+                eprintln!(
+                    "Skipping invalid CRV_RDC line (need CRV_RDC L/R R D M S CH_NS CH_D CH_M CH_S CH_EW CH_DIST): {}",
+                    line
+                );
+                continue;
+            }
 
+            let side = parts[1];
+
+            // Radius
+            let radius_raw: f64 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Invalid radius in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+
+            // Delta (central angle) D M S
+            let d: f64 = match parts[3].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Invalid delta degrees in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+            let m: f64 = match parts[4].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Invalid delta minutes in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+            let s: f64 = match parts[5].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Invalid delta seconds in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+
+            // Chord bearing N/S D M S E/W
+            let ch_ns = parts[6];
+            let ch_d: f64 = match parts[7].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Invalid chord degrees in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+            let ch_m: f64 = match parts[8].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Invalid chord minutes in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+            let ch_s: f64 = match parts[9].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Invalid chord seconds in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+            let ch_ew = parts[10];
+
+            // Chord distance
+            let chord_dist_raw: f64 = match parts[11].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Invalid chord distance in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+
+            if radius_raw <= 0.0 {
+                eprintln!("Invalid radius in CRV_RDC (<= 0): {}", line);
+                continue;
+            }
+
+            let radius_feet = to_feet(radius_raw, &unit_choice);
+            if radius_feet <= 0.0 {
+                eprintln!("Radius converts to zero/negative in CRV_RDC: {}", line);
+                continue;
+            }
+
+            let delta_degrees = d + m / 60.0 + s / 3600.0;
+            let delta_radians = delta_degrees.to_radians();
+
+            if delta_degrees <= 0.0 {
+                eprintln!("Delta angle is <= 0 in CRV_RDC: {}", line);
+                continue;
+            }
+
+            // Chord bearing to azimuth
+            let chord_bearing_deg = match quadrant_to_azimuth(ch_ns, ch_d, ch_m, ch_s, ch_ew) {
+                Some(a) => a,
+                None => {
+                    eprintln!("Invalid chord bearing in CRV_RDC: {}", line);
+                    continue;
+                }
+            };
+
+            // Chord distance (feet)
+            let chord_dist_feet = to_feet(chord_dist_raw, &unit_choice);
+            if chord_dist_feet <= 0.0 {
+                eprintln!("Chord distance converts to zero/negative in CRV_RDC: {}", line);
+                continue;
+            }
+
+            // Geometric chord from R and Δ: c = 2 R sin(Δ/2)
+            let geom_chord_feet = 2.0 * radius_feet * (delta_radians / 2.0).sin();
+
+            // Optional sanity check
+            let diff = (geom_chord_feet - chord_dist_feet).abs();
+            if geom_chord_feet > 0.0 && diff / geom_chord_feet > 0.05 {
+                eprintln!(
+                    "Warning: chord distance differs from R,Δ geometry by >5% in CRV_RDC.\n  Geom chord ≈ {:.3}, given chord ≈ {:.3}\n  Line: {}",
+                    geom_chord_feet, chord_dist_feet, line
+                );
+            }
+
+            // Direction of curvature: left = +, right = -
+            let sign = match side {
+                "L" | "l" => 1.0_f64,
+                "R" | "r" => -1.0_f64,
+                _ => {
+                    eprintln!("Invalid curve side in CRV_RDC (use L or R): {}", line);
+                    continue;
+                }
+            };
+
+            // Tangent at PC from chord bearing and Δ:
+            //  For left curve:  tangent_PC = chord - Δ/2
+            //  For right curve: tangent_PC = chord + Δ/2
+            let start_azimuth_deg = chord_bearing_deg - sign * (delta_degrees / 2.0);
+
+            // Approximate with segments like CRV/CRV_RL
+            let segments = 16_usize;
+            let delta_per_seg_deg = delta_degrees / segments as f64;
+            let delta_per_seg_rad = delta_radians / segments as f64;
+
+            let arc_len_per_seg_feet = radius_feet * delta_per_seg_rad;
+
+            let mut current_azimuth_deg = start_azimuth_deg;
+            let mut last_coord = *coordinates.last().unwrap();
+
+            for _ in 0..segments {
+                let a_rad = current_azimuth_deg.to_radians();
+
+                let dx = a_rad.sin() * arc_len_per_seg_feet * xratio;
+                let dy = a_rad.cos() * arc_len_per_seg_feet * yratio;
+
+                last_coord = (last_coord.0 + dx, last_coord.1 + dy);
+                coordinates.push(last_coord);
+
+                // step tangent around the curve
+                current_azimuth_deg += sign * delta_per_seg_deg;
+            }
+
+            // Update tangent at PT (for any following CRV_RL / CRV)
+            last_azimuth_degrees = Some(current_azimuth_deg);
+            continue;
+        }
+
+////////////////////////////////////////////////////////////////////////////
     // 1b) Curves defined by Radius + Delta: CRV L/R RADIUS D M S (your existing block)
-    if parts[0].eq_ignore_ascii_case("CRV") {
-        // ... keep your current CRV block here unchanged ...
+if parts[0].eq_ignore_ascii_case("CRV") {
+    if parts.len() < 7 {
+        eprintln!("Skipping invalid CRV line (need CRV L/R RADIUS D M S): {}", line);
+        continue;
     }
+
+    // Need previous azimuth (tangent into curve)
+    let start_azimuth = match last_azimuth_degrees {
+        Some(a) => a,
+        None => {
+            eprintln!("Curve '{}' has no previous azimuth (no tangent).", line);
+            continue;
+        }
+    };
+
+    let side = parts[1];
+
+    let radius_raw: f64 = match parts[2].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Invalid radius in CRV: {}", line);
+            continue;
+        }
+    };
+
+    let deg: f64 = match parts[3].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Invalid degrees in CRV: {}", line);
+            continue;
+        }
+    };
+    let min: f64 = match parts[4].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Invalid minutes in CRV: {}", line);
+            continue;
+        }
+    };
+    let sec: f64 = match parts[5].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Invalid seconds in CRV: {}", line);
+            continue;
+        }
+    };
+
+    if radius_raw <= 0.0 {
+        eprintln!("Invalid radius in CRV (<=0): {}", line);
+        continue;
+    }
+
+    let radius_feet = to_feet(radius_raw, &unit_choice);
+    if radius_feet <= 0.0 {
+        eprintln!("Radius converts to zero in CRV: {}", line);
+        continue;
+    }
+
+    // Convert D/M/S to total angle in degrees
+    let delta_degrees = deg + min / 60.0 + sec / 3600.0;
+    let delta_radians = delta_degrees.to_radians();
+
+    // Direction: Left = +, Right = -
+    let sign = match side {
+        "L" | "l" => 1.0,
+        "R" | "r" => -1.0,
+        _ => {
+            eprintln!("Invalid curve side in CRV (use L or R): {}", line);
+            continue;
+        }
+    };
+
+    // Number of curve segments for approximation
+    let segments = 16;
+    let delta_per_seg_deg = delta_degrees / segments as f64;
+    let delta_per_seg_rad = delta_radians / segments as f64;
+
+    // Arc length per small segment
+    let arc_len_per_seg = radius_feet * delta_per_seg_rad;
+
+    let mut current_azimuth = start_azimuth;
+    let mut last_coord = *coordinates.last().unwrap();
+
+    for _ in 0..segments {
+        current_azimuth += sign * delta_per_seg_deg;
+        let a_rad = current_azimuth.to_radians();
+
+        let dx = a_rad.sin() * arc_len_per_seg * xratio;
+        let dy = a_rad.cos() * arc_len_per_seg * yratio;
+
+        last_coord = (last_coord.0 + dx, last_coord.1 + dy);
+        coordinates.push(last_coord);
+    }
+
+    // The tangent changes by the full delta
+    last_azimuth_degrees = Some(current_azimuth);
+    continue;
+}
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    }
     // Generate output filenames
     let kml_output_path = format!("{}.kml", base_filename);
     let mut output_file = File::create(&kml_output_path)?;
