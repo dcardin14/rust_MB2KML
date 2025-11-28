@@ -14,6 +14,43 @@
 </Style>
 <Placemark>
 <styleUrl>#blueTransparent</styleUrl>
+<description><![CDATA[
+File: MB.txt
+Generated: 2025-11-27 21:08:35
+
+39.972286	-104.743181
+
+N 89 30 50 W 490.76 
+S 03 16 26 W 812.22 
+S 89 30 30 E 227.29 
+N 23 27 19 E 24.84
+N 47 17 50 E 71.50
+N 75 11 24 E 130.92 
+N 58 58 03 E 168.28 
+N 87 20 47 E 104.86 
+N 65 07 25 E 54.93 
+N 00 17 31 E 340.28
+N 11 15 08 W 85.51
+N 35 45 13 W 48.72
+N 49 17 51 W 187.31
+
+]]></description>
+<Placemark>
+  <name>POB</name>
+  <Point>
+    <coordinates>-104.743181,39.972286,1 </coordinates>
+  </Point>
+</Placemark>
+<Placemark>
+  <name>First Call</name>
+  <LineString>
+    <tessellate>1</tessellate>
+    <coordinates>
+      -104.743181,39.972286,1
+      -104.74493265026088,39.97229743078642,1
+    </coordinates>
+  </LineString>
+</Placemark>
 <altitudeMode>relativeToGround</altitudeMode>
 <Polygon>
   <tessellate>1</tessellate>

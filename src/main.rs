@@ -9,6 +9,7 @@ use std::path::Path;
 use std::env;
 use std::fs;
 use std::process;
+use chrono::Local;
 
 /// Determines if a polygon follows the right-hand rule (counterclockwise)
 fn is_clockwise(coordinates: &Vec<(f64, f64)>) -> bool {
@@ -180,65 +181,47 @@ fn write_geojson(filename: &str, coordinates: &Vec<(f64, f64)>) -> io::Result<()
     println!("GeoJSON file generated successfully: {}", output_file_path);
     Ok(())
 }
-////////////////////////////
 
-fn to_feet(value: f64, unit_choice: &str) -> f64 {
-    match unit_choice {
-        "f" => value,
-        "v" => value * 2.77778333333,
-        "r" => value * 16.5,
-        "c" => value * 66.0,
-        "p" => value * 16.5,
-        "y" => value * 3.0,
-        _ => 0.0,
+///////////////////////////////////////////////////////////////////////////
+// Strip comments from a line (anything after //)
+fn strip_comments(line: &str) -> String {
+    match line.find("//") {
+        Some(idx) => line[..idx].trim().to_string(),
+        None => line.trim().to_string(),
     }
 }
-////////////////////////////
 
-// Strip comments from an input line. Supports '#' and '//' comment markers.
-fn strip_comments(s: &str) -> &str {
-    let mut end = s.len();
-    if let Some(p) = s.find('#') {
-        end = end.min(p);
+///////////////////////////////////////////////////////////////////////////
+// Convert distance from selected unit to feet
+fn to_feet(value: f64, unit: &str) -> f64 {
+    match unit {
+        "f" => value,                    // feet
+        "v" => value * 33.0 / 39.37,    // varas
+        "r" => value * 16.5,            // rods
+        "c" => value * 66.0,            // chains
+        "p" => value * 16.5,            // poles (same as rods)
+        "y" => value * 3.0,             // yards
+        _ => value,                      // default to feet
     }
-    if let Some(p) = s.find("//") {
-        end = end.min(p);
-    }
-    &s[..end].trim()
 }
 
-
-
+///////////////////////////////////////////////////////////////////////////
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    let program = &args[0];
 
-    // No arguments → print usage
     if args.len() < 2 {
-        print_usage(program);
-        return Ok(());
+        print_usage(&args[0]);
+        process::exit(1);
     }
 
-    let arg1 = &args[1];
-
-    // Handle -h / --help
-    if arg1 == "-h" || arg1 == "--help" {
-        print_usage(program);
-        return Ok(());
-    }
-
-    let filename = arg1;
-
-    // 🔹 Recreate base_filename for KML/GeoJSON output
+    let filename = &args[1];
     let base_filename = Path::new(filename)
         .file_stem()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
 
     let data = match fs::read_to_string(filename) {
-        Ok(d) => d,
+        Ok(s) => s,
         Err(e) => {
             eprintln!("Unable to read file '{}': {}", filename, e);
             process::exit(1);
@@ -282,7 +265,63 @@ fn main() -> io::Result<()> {
     ////////////////////////////////////////////////
     let mut coordinates = vec![(long, lat)];
     let mut last_azimuth_degrees: Option<f64> = None;
+    let mut first_call_captured = false;
     ////////////////////////////////////////////////
+    // Collect input lines so we can extract the first call (after the POB)
+    let all_lines: Vec<&str> = data.lines().collect();
+    // find POB index (first non-empty, non-comment line)
+    let mut pob_index: Option<usize> = None;
+    for (i, l) in all_lines.iter().enumerate() {
+        if !strip_comments(l).is_empty() {
+            pob_index = Some(i);
+            break;
+        }
+    }
+
+    // Find the first call line after the POB
+    let mut first_call_line: Option<String> = None;
+    if let Some(pobi) = pob_index {
+        for l in all_lines.iter().skip(pobi + 1) {
+            let s = strip_comments(l);
+            if s.is_empty() {
+                continue;
+            }
+            first_call_line = Some(s);
+            break;
+        }
+    }
+
+    // Compute a small LineString for the first call (if it's a straight line)
+    let mut first_call_coords: Option<Vec<(f64, f64)>> = None;
+    if let Some(call_line) = first_call_line.as_deref() {
+        let parts: Vec<&str> = call_line.split_whitespace().collect();
+        if (parts.get(0).map(|s| s.eq_ignore_ascii_case("N")).unwrap_or(false)
+            || parts.get(0).map(|s| s.eq_ignore_ascii_case("S")).unwrap_or(false))
+            && parts.len() >= 6
+        {
+            // Parse straight line and compute endpoint
+            let dir_ns = parts[0];
+            let deg: f64 = parts[1].parse().unwrap_or(0.0);
+            let min: f64 = parts[2].parse().unwrap_or(0.0);
+            let sec: f64 = parts[3].parse().unwrap_or(0.0);
+            let dir_ew = parts[4];
+            let dist_raw: f64 = parts[5].parse().unwrap_or(0.0);
+
+            if dist_raw > 0.0 {
+                if let Some(azimuth_deg) = quadrant_to_azimuth(dir_ns, deg, min, sec, dir_ew) {
+                    let dist_feet = to_feet(dist_raw, &unit_choice);
+                    if dist_feet > 0.0 {
+                        let a_radians = azimuth_deg.to_radians();
+                        let x_add = a_radians.sin() * dist_feet * xratio;
+                        let y_add = a_radians.cos() * dist_feet * yratio;
+                        let start = (long, lat);
+                        let end = (start.0 + x_add, start.1 + y_add);
+                        first_call_coords = Some(vec![start, end]);
+                    }
+                }
+            }
+        }
+    }
     
     for line in lines.skip(1) {
         // Remove comments (full-line or inline) and trim
@@ -290,6 +329,8 @@ fn main() -> io::Result<()> {
         if line.is_empty() {
             continue;
         }
+        // snapshot the coordinates length before processing this call
+        let before_len = coordinates.len();
 
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.is_empty() {
@@ -373,6 +414,20 @@ fn main() -> io::Result<()> {
 
             last_coord = (last_coord.0 + x_add, last_coord.1 + y_add);
             coordinates.push(last_coord);
+        }
+
+        // Capture first-call coordinates if this was the first call processed
+        if !first_call_captured && coordinates.len() > before_len {
+            let mut fc = Vec::new();
+            // include the starting point (POB or last point before the call)
+            if before_len >= 1 {
+                fc.push(coordinates[before_len - 1]);
+            }
+            for i in before_len..coordinates.len() {
+                fc.push(coordinates[i]);
+            }
+            first_call_coords = Some(fc);
+            first_call_captured = true;
         }
 
         last_azimuth_degrees = Some(current_azimuth_deg);
@@ -747,6 +802,45 @@ if parts[0].eq_ignore_ascii_case("CRV") {
 
     writeln!(output_file, "<Placemark>")?;
     writeln!(output_file, "<styleUrl>#blueTransparent</styleUrl>")?;
+    // Embed the original input file contents into the KML balloon text.
+    // Include source filename and generation timestamp, and wrap in CDATA.
+    let gen_ts = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut safe_input = data.clone();
+    // Escape any closing CDATA sequences so the XML stays valid
+    safe_input = safe_input.replace(
+        "]]>",
+        "]]]]><![CDATA[>"
+    );
+    writeln!(output_file, "<description><![CDATA[")?;
+    writeln!(output_file, "File: {}", filename)?;
+    writeln!(output_file, "Generated: {}", gen_ts)?;
+    writeln!(output_file, "")?;
+    writeln!(output_file, "{}", safe_input)?;
+    writeln!(output_file, "]]></description>")?;
+    // Small altitude offset for placemarks/lines to avoid z-fighting
+    let altitude_m = 1.0;
+    // Add a POB point Placemark
+    writeln!(output_file, "<Placemark>")?;
+    writeln!(output_file, "  <name>POB</name>")?;
+    writeln!(output_file, "  <Point>")?;
+    writeln!(output_file, "    <coordinates>{},{},{} </coordinates>", long, lat, altitude_m)?;
+    writeln!(output_file, "  </Point>")?;
+    writeln!(output_file, "</Placemark>")?;
+
+    // Add a LineString for the first call (if available)
+    if let Some(ref fc) = first_call_coords {
+        writeln!(output_file, "<Placemark>")?;
+        writeln!(output_file, "  <name>First Call</name>")?;
+        writeln!(output_file, "  <LineString>")?;
+        writeln!(output_file, "    <tessellate>1</tessellate>")?;
+        writeln!(output_file, "    <coordinates>")?;
+        for (lon, latv) in fc {
+            writeln!(output_file, "      {},{},{}", lon, latv, altitude_m)?;
+        }
+        writeln!(output_file, "    </coordinates>")?;
+        writeln!(output_file, "  </LineString>")?;
+        writeln!(output_file, "</Placemark>")?;
+    }
     // Use a small altitude above ground to avoid z-fighting with terrain and ensure fill renders
     writeln!(output_file, "<altitudeMode>relativeToGround</altitudeMode>")?;
     writeln!(output_file, "<Polygon>")?;
@@ -757,7 +851,6 @@ if parts[0].eq_ignore_ascii_case("CRV") {
     writeln!(output_file, "<coordinates>")?;
 
     // Lift polygon by 1 meter to avoid clipping with ground (Google Earth z-fighting)
-    let altitude_m = 1.0;
     for (long, lat) in &coordinates {
         writeln!(output_file, "{},{},{}", long, lat, altitude_m)?;
     }
