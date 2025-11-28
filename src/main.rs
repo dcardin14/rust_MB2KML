@@ -195,6 +195,18 @@ fn to_feet(value: f64, unit_choice: &str) -> f64 {
 }
 ////////////////////////////
 
+// Strip comments from an input line. Supports '#' and '//' comment markers.
+fn strip_comments(s: &str) -> &str {
+    let mut end = s.len();
+    if let Some(p) = s.find('#') {
+        end = end.min(p);
+    }
+    if let Some(p) = s.find("//") {
+        end = end.min(p);
+    }
+    &s[..end].trim()
+}
+
 
 
 fn main() -> io::Result<()> {
@@ -242,10 +254,18 @@ fn main() -> io::Result<()> {
     let mut long: f64 = 0.0;
     let lines = data.lines();
 
-    if let Some(line) = lines.clone().next() {
-        let coords: Vec<&str> = line.split_whitespace().collect();
-        lat = coords[0].parse().unwrap();
-        long = coords[1].parse().unwrap();
+    // Find the first non-empty, non-commented line to use as the Point of Beginning
+    for l in lines.clone() {
+        let s = strip_comments(l);
+        if s.is_empty() {
+            continue;
+        }
+        let coords: Vec<&str> = s.split_whitespace().collect();
+        if coords.len() >= 2 {
+            lat = coords[0].parse().unwrap();
+            long = coords[1].parse().unwrap();
+        }
+        break;
     }
 
     if lat < 25.0 || lat > 50.0 || long > -60.0 || long < -125.0 {
@@ -264,11 +284,12 @@ fn main() -> io::Result<()> {
     let mut last_azimuth_degrees: Option<f64> = None;
     ////////////////////////////////////////////////
     
-for line in lines.skip(1) {
-    let line = line.trim();
-    if line.is_empty() {
-        continue;
-    }
+    for line in lines.skip(1) {
+        // Remove comments (full-line or inline) and trim
+        let line = strip_comments(line);
+        if line.is_empty() {
+            continue;
+        }
 
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.is_empty() {
@@ -525,7 +546,7 @@ for line in lines.skip(1) {
             last_azimuth_degrees = Some(current_azimuth_deg);
             continue;
         }
-
+        
 ////////////////////////////////////////////////////////////////////////////
     // 1b) Curves defined by Radius + Delta: CRV L/R RADIUS D M S (your existing block)
 if parts[0].eq_ignore_ascii_case("CRV") {
@@ -627,7 +648,82 @@ if parts[0].eq_ignore_ascii_case("CRV") {
     continue;
 }
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Straight line handler
+// 2) Straight lines: N|S D M S E|W DIST
+    if (parts[0].eq_ignore_ascii_case("N") || parts[0].eq_ignore_ascii_case("S")) && parts.len() >= 6 {
+        let dir_ns = parts[0];
+
+        let deg: f64 = match parts[1].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("Invalid degrees in line: {}", line);
+                continue;
+            }
+        };
+        let min: f64 = match parts[2].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("Invalid minutes in line: {}", line);
+                continue;
+            }
+        };
+        let sec: f64 = match parts[3].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("Invalid seconds in line: {}", line);
+                continue;
+            }
+        };
+
+        let dir_ew = parts[4];
+
+        let dist_raw: f64 = match parts[5].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("Invalid distance in line: {}", line);
+                continue;
+            }
+        };
+
+        // Convert quadrant bearing to azimuth
+        let azimuth_deg = match quadrant_to_azimuth(dir_ns, deg, min, sec, dir_ew) {
+            Some(a) => a,
+            None => {
+                eprintln!("Invalid bearing in line: {}", line);
+                continue;
+            }
+        };
+
+        // Distance in feet
+        let dist_feet = to_feet(dist_raw, &unit_choice);
+        if dist_feet <= 0.0 {
+            eprintln!("Distance converts to zero/negative in line: {}", line);
+            continue;
+        }
+
+        let a_radians = azimuth_deg.to_radians();
+
+        let x_add = a_radians.sin() * dist_feet * xratio;
+        let y_add = a_radians.cos() * dist_feet * yratio;
+
+        let last_coord = *coordinates.last().unwrap();
+        let new_coord = (last_coord.0 + x_add, last_coord.1 + y_add);
+        coordinates.push(new_coord);
+
+        // 🔑 This is what curves need:
+        last_azimuth_degrees = Some(azimuth_deg);
+
+        continue;
     }
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    }
+    // Ensure KML outer ring follows counterclockwise winding so fill renders
+    if is_clockwise(&coordinates) {
+        coordinates.reverse();
+    }
+
     // Generate output filenames
     let kml_output_path = format!("{}.kml", base_filename);
     let mut output_file = File::create(&kml_output_path)?;
@@ -641,7 +737,8 @@ if parts[0].eq_ignore_ascii_case("CRV") {
     writeln!(output_file, "    <width>2</width>")?;
     writeln!(output_file, "  </LineStyle>")?;
     writeln!(output_file, "  <PolyStyle>")?;
-    writeln!(output_file, "    <color>4DFF0000</color>")?;   // Fill: BLUE @ ~30% opacity
+    // KML color format is AABBGGRR. Use semi-opaque red for fill (AA=4D, BB=00, GG=00, RR=FF)
+    writeln!(output_file, "    <color>4D0000FF</color>")?;
     writeln!(output_file, "    <fill>1</fill>")?;
     writeln!(output_file, "    <outline>1</outline>")?;
     writeln!(output_file, "  </PolyStyle>")?;
@@ -650,18 +747,23 @@ if parts[0].eq_ignore_ascii_case("CRV") {
 
     writeln!(output_file, "<Placemark>")?;
     writeln!(output_file, "<styleUrl>#blueTransparent</styleUrl>")?;
-    writeln!(output_file, "<altitudeMode>clampToGround</altitudeMode>")?;
+    // Use a small altitude above ground to avoid z-fighting with terrain and ensure fill renders
+    writeln!(output_file, "<altitudeMode>relativeToGround</altitudeMode>")?;
     writeln!(output_file, "<Polygon>")?;
+    // Allow the polygon to follow terrain (helps with large/uneven terrain)
+    writeln!(output_file, "  <tessellate>1</tessellate>")?;
     writeln!(output_file, "<outerBoundaryIs>")?;
     writeln!(output_file, "<LinearRing>")?;
     writeln!(output_file, "<coordinates>")?;
 
+    // Lift polygon by 1 meter to avoid clipping with ground (Google Earth z-fighting)
+    let altitude_m = 1.0;
     for (long, lat) in &coordinates {
-        writeln!(output_file, "{},{},0", long, lat)?;
+        writeln!(output_file, "{},{},{}", long, lat, altitude_m)?;
     }
-    //Explicitly close the ring
+    // Explicitly close the ring (with same altitude)
     if let Some((first_long, first_lat)) = coordinates.first() {
-    writeln!(output_file, "{},{},0", first_long, first_lat)?;
+        writeln!(output_file, "{},{},{}", first_long, first_lat, altitude_m)?;
     }
 
     writeln!(output_file, "</coordinates>")?;
