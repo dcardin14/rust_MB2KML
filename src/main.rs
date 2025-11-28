@@ -24,9 +24,84 @@ fn is_clockwise(coordinates: &Vec<(f64, f64)>) -> bool {
 ///////////////////////////////////////////////////////////////////////////
 fn print_usage(program: &str) {
     eprintln!(
-        "Usage: {prog} <input_file>\n\n\
-         Reads a metes-and-bounds text file and writes KML and GeoJSON.\n\n\
-         Examples:\n  {prog} my_tract.txt\n",
+"Usage:
+  {prog} <input_file>
+
+Description:
+  {prog} reads a metes-and-bounds text file and generates a closed polygon
+  in both KML (.kml) and GeoJSON (.geojson) formats.
+
+  The input file must have:
+    • First line: latitude and longitude of the Point of Beginning (POB),
+      in decimal degrees:  LAT LON
+    • Subsequent lines: straight-line calls and/or curves.
+
+Supported distance units:
+  On startup, the program prompts for units:
+    f  Feet
+    v  Varas
+    r  Rods
+    c  Chains
+    p  Poles
+    y  Yards
+
+  All distances in the file are interpreted in that unit system and
+  internally converted to feet.
+
+Input format:
+
+  1) Point of Beginning (first line)
+       LAT LON
+     Example:
+       29.7604 -95.3698
+
+  2) Straight lines (quadrant bearing + distance)
+       N|S  D  M  S  E|W  DIST
+     Example:
+       N 03 02 00 E 120.43
+
+  3) Curves by Radius + Delta (central angle)
+       CRV  L|R  RADIUS  D  M  S
+     Example:
+       CRV L 1992.0 34 26 06
+
+     Here Delta (D M S) is the central angle of the curve. The tangent
+     direction at the beginning of the curve is inherited from the
+     previous straight segment.
+
+  4) Curves by Radius + Arc Length
+       CRV_RL  L|R  RADIUS  ARC_LENGTH
+     Example:
+       CRV_RL R 1500.0 800.0
+
+     The central angle Δ is computed from:
+       Δ = ARC_LENGTH / RADIUS
+
+     The curve is tangent to the previous line, and the direction of
+     curvature (left/right) is given by L or R.
+
+  5) Curves by Radius + Delta + Chord
+       CRV_RDC  L|R  RADIUS  D  M  S  CH_NS  CH_D  CH_M  CH_S  CH_EW  CHORD_DIST
+     Example:
+       CRV_RDC L 1992.0 34 26 06 N 45 00 00 E 1600.00
+
+     This form specifies:
+       • Curve geometry: radius + central angle (Delta)
+       • Orientation: chord bearing (CH_NS / CH_D / CH_M / CH_S / CH_EW)
+       • Check distance: chord length (CHORD_DIST)
+
+     The tangent at the Point of Curvature (PC) is derived from the
+     chord bearing and Delta.
+
+Output:
+  • <input_stem>.kml     – polygon as a KML file
+  • <input_stem>.geojson – polygon as a GeoJSON file
+  The polygon is explicitly closed by repeating the POB at the end.
+
+Examples:
+  {prog} tract1.txt
+  {prog} my_legal_description.txt
+",
         prog = program
     );
 }
